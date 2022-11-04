@@ -1,0 +1,449 @@
+---
+# file: ansible-gcp-servers-setup-all.yml
+# configures the server instances
+
+# This First Play Sets up critical configuration on servers
+- hosts: targets
+  # as the systems are not yet "known" by Ansible Facts cannot be gathered yet
+  gather_facts: no
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  pre_tasks:
+    # To operate remotely in critical files without direct user input
+    - name: Remove require tty - alt
+      lineinfile:
+        regexp: "requiretty"
+        dest: /etc/sudoers.d/os_defaults
+        state: absent
+    # Giving permissions in sudoers for system critical files (see https://docs.ansible.com/ansible/latest/modules/lineinfile_module.html)
+    - name: Validate the sudoers file before saving  not to require password
+      lineinfile:
+        dest: /etc/sudoers
+        state: present
+        regexp: '^%ADMIN ALL='
+        line: '%ADMIN ALL=(ALL) NOPASSWD: ALL'
+        validate: /usr/sbin/visudo -cf %s
+    # Install the SSH key on servers
+    - name: install ssh key
+      authorized_key:
+        user: ubuntu
+        key: "{{ lookup('file', '/home/vagrant/.ssh/id_rsa.pub') }}"
+        state: present
+
+# This Second Play installs and configures the required software for node exporter in all microservices servers
+# tasks names are self explanatory
+- hosts: microservices
+  gather_facts: True
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+    - name: create node exporter config dir
+      file:
+        path: /etc/node_exporter
+        state: directory
+      
+    - name: download and unzip node exporter
+      unarchive:
+        src: https://github.com/prometheus/node_exporter/releases/download/v1.4.0/node_exporter-1.4.0.linux-amd64.tar.gz
+        dest: /tmp/
+        remote_src: yes
+        validate_certs: no
+
+    - name: move the binary to the final destination
+      copy:
+        src: /tmp/node_exporter-1.4.0.linux-amd64/node_exporter
+        dest: /usr/local/bin/node_exporter
+        mode: 0755
+        remote_src: yes
+
+    - name: clean
+      file:
+        path: /tmp/node_exporter-1.4.0.linux-amd64/
+        state: absent
+
+    - name: install service
+      template:
+        src: /home/vagrant/labs/project/templates/node_exporter.service.j2
+        dest: /etc/systemd/system/node_exporter.service
+
+    - name: reload_daemon_and_restart_node_exporter
+      systemd:
+        name: node_exporter
+        state: restarted
+        daemon_reload: yes
+        enabled: yes
+
+    - name: service always started
+      systemd:
+        name: node_exporter
+        state: started
+        enabled: yes
+
+# This Third Play installs and configures the required software for prometheus and grafana in monitoring server
+# tasks names are self explanatory
+- hosts: monitoring
+  gather_facts: True
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+    - name: Gather facts from calculator servers
+      setup:
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['calculator'] }}"
+
+    - name: update and install prometheus
+      apt:
+        name: prometheus
+        state: latest
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: install gpg
+      apt:
+        name: gnupg,software-properties-common
+        state: present
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: add gpg key
+      apt_key:
+        url: "https://packages.grafana.com/gpg.key"
+        validate_certs: no
+
+    - name: add repository
+      apt_repository:
+        repo: "deb https://packages.grafana.com/oss/deb stable main"             
+        state: present
+        validate_certs: no
+
+    - name: install grafana
+      apt:
+        name: grafana
+        state: latest
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: prometheus configuration file
+      template:
+        src: /home/vagrant/labs/project/templates/prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        mode: 0755
+        owner: root
+        group: root
+
+    - name: install service
+      template:
+        src: /home/vagrant/labs/project/templates/prometheus.service.j2
+        dest: /etc/systemd/system/prometheus.service
+
+    - name: reload_daemon_and_restart_prometheus
+      systemd:
+        name: prometheus
+        state: restarted
+        daemon_reload: yes
+        enabled: yes
+
+    - name: service always started
+      systemd:
+        name: prometheus
+        state: started
+        enabled: yes
+
+    - name: start service grafana-server
+      systemd:
+        name: grafana-server
+        state: started
+        enabled: yes
+
+    - name: wait for service up
+      uri:
+        url: "http://127.0.0.1:3000"
+        status_code: 200
+      register: __result
+      until: __result.status == 200
+      retries: 120
+      delay: 1
+
+    - name: change admin password for grafana gui
+      shell : grafana-cli admin reset-admin-password 'abc1234'
+
+# This Fourth Play installs the required software for Vuecalc, Expressed and Happy microservices servers
+# tasks names are self explanatory
+- hosts: backend
+  gather_facts: True
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+    - name: install node 
+      shell: curl -sL https://deb.nodesource.com/setup_10.x | sudo -E bash - && sudo apt-get install -y nodejs
+
+    - name: Install packages
+      apt: update_cache=yes  
+        name={{ item }}
+        state=present 
+      with_items:
+        - nodejs
+        - build-essential
+        - python
+
+# This Fifth Play configures the required software in Expressed microservice server
+# tasks names are self explanatory
+- hosts: expressed
+  gather_facts: True
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  vars:
+    - package: "expressed"
+
+  tasks:
+    - name: Gather facts from bootstorage servers
+      setup:
+      delegate_to: "bootstorage"
+      delegate_facts: true
+
+    - name: Copy with owner and permissions
+      copy:
+        src: /home/vagrant/labs/project/Calculator/expressed
+        dest: /home/ubuntu
+
+    - name: Recursively remove directory
+      file:
+        path: /home/ubuntu/expressed/nodes_modules
+        state: absent 
+
+    - name: sudo npm i --unsafe-perm
+      shell: sudo npm i --unsafe-perm
+      args:
+        chdir: /home/ubuntu/expressed
+
+    - name: Apply sytemd template
+      template:
+        src: /home/vagrant/labs/project/templates/http_expressed_happy.service.j2
+        dest: /etc/systemd/system/http.service
+
+    - name: Reload the SystemD to re-read configurations
+      systemd:
+        daemon-reload: yes
+
+    - name: Start service
+      systemd:
+        name: http
+        enabled: yes
+        state: started   
+
+# This Sixth Play configures the required software in Happy microservices server
+# tasks names are self explanatory
+- hosts: happy
+  gather_facts: True
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  vars:
+    - package: "happy"
+
+  tasks:
+    - name: Gather facts from bootsorage servers
+      setup:
+      delegate_to: "bootstorage"
+      delegate_facts: true
+
+    - name: Copy with owner and permissions
+      copy:
+        src: /home/vagrant/labs/project/Calculator/happy
+        dest: /home/ubuntu
+
+    - name: Recursively remove directory
+      file:
+        path: /home/ubuntu/happy/nodes_modules
+        state: absent 
+
+    - name: sudo npm i --unsafe-perm
+      shell: sudo npm i --unsafe-perm
+      args:
+        chdir: /home/ubuntu/happy
+
+    - name: Apply sytemd template
+      template:
+        src: /home/vagrant/labs/project/templates/http_expressed_happy.service.j2
+        dest: /etc/systemd/system/http.service
+
+    - name: Reload the SystemD to re-read configurations
+      systemd:
+        daemon-reload: yes
+
+    - name: Start service
+      systemd:
+        name: http
+        enabled: yes
+        state: started  
+
+# This Seventh Play installs and configures the required software in Bootsorage microservice server
+# tasks names are self explanatory
+- hosts: bootstorage
+  gather_facts: True
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  vars:
+    - redis_host: "10.122.168.179" 
+
+  tasks:
+    - name: Install packages
+      apt: update_cache=yes  
+        name={{ item }}
+        state=present 
+      with_items:
+        - openjdk-8-jdk
+        - maven
+        - build-essential
+
+    - name: Copy with owner and permissions
+      copy:
+        src: /home/vagrant/labs/project/Calculator/bootstorage
+        dest: /home/ubuntu
+
+    - name: mvn package
+      shell: mvn package
+      args:
+        chdir: /home/ubuntu/bootstorage 
+
+    - name: Apply sytemd template
+      template:
+        src: /home/vagrant/labs/project/templates/http_bootstorage.service.j2
+        dest: /etc/systemd/system/http.service
+
+    - name: Reload the SystemD to re-read configurations
+      systemd:
+        daemon-reload: yes
+
+    - name: Start service
+      systemd:
+        name: http
+        enabled: yes
+        state: started    
+
+# This Eight Play configures the required software in Vuecalc microservices servers
+# tasks names are self explanatory
+- hosts: frontend
+  gather_facts: True
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+    - name: Gather facts from calculator servers
+      setup:
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['calculator'] }}"
+
+    - name: Copy with owner and permissions
+      copy:
+        src: /home/vagrant/labs/project/Calculator/vuecalc
+        dest: /home/ubuntu
+
+    - name: npm install -g http-server
+      shell: npm install -g http-server
+      args:
+        chdir: /home/ubuntu/vuecalc 
+
+    - name: Recursively remove directory
+      file:
+        path: /home/ubuntu/vuecalc/nodes_modules
+        state: absent 
+
+    - name: sudo npm i --unsafe-perm
+      shell: sudo npm i --unsafe-perm
+      args:
+        chdir: /home/ubuntu/vuecalc
+
+    - name: Apply sytemd template
+      template:
+        src: /home/vagrant/labs/project/templates/http_vuecalc.service.j2
+        dest: /etc/systemd/system/http.service
+
+    - name: Reload the SystemD to re-read configurations
+      systemd:
+        daemon-reload: yes
+
+    - name: Start service
+      systemd:
+        name: http
+        enabled: yes
+        state: started   
+
+# This Ninth Play install the required software in the Load Balancer
+- hosts: loadbal
+  gather_facts: true
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+    # as there is no internal DNS service, we need to populate theb /etc/hosts
+    - name: update /etc/hosts file for name resolution of self
+      lineinfile:
+        dest: /etc/hosts
+        regexp: '.*{{ item }}$'
+        line: "127.0.0.1 {{item}}"
+        state: present
+      with_items: balancer
+    # as there is no internal DNS service, we need to populate the /etc/hosts
+    - name: update /etc/hosts file for name resolution
+      lineinfile:
+        dest: /etc/hosts
+        regexp: '.*{{ item }}$'
+        line: "{{ hostvars[item]['ansible_default_ipv4']['address'] }} {{item}}"
+        state: present
+      when: hostvars[item]['ansible_default_ipv4']['address'] is defined
+      with_items: '{{groups.frontend}}'
+
+    - name: add HAPROXY Repository
+      apt_repository:
+        repo: ppa:vbernat/haproxy-2.1
+        update_cache: true
+
+    - name: install haproxy and socat
+      apt:
+        pkg: ['haproxy', 'socat']
+        state: latest
+
+    - name: enable haproxy
+      lineinfile:
+        path: /etc/default/haproxy
+        regexp: "^ENABLED.+$"
+        line: "ENABLED=1"
+        state: present
+
+
+    - name: deploy haproxy config
+      template:
+        src: /home/vagrant/labs/project/templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        mode: 0644
+        validate: haproxy -f %s -c -q
+      notify: restart haproxy
+
+    - name: Ensure HAProxy is started and enabled on boot.
+      service:
+        name: haproxy
+        state: started
+        enabled: yes
+
+# The handler is common to the nginx installation steps
+  handlers:
+
+  - name: restart haproxy
+    service:
+      name: haproxy
+      state: restarted

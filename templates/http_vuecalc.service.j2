@@ -1,0 +1,17 @@
+[Unit]
+Description=http
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/vuecalc
+ExecStart=/usr/bin/npm run prod
+Environment="VUE_APP_BOOTSTORAGE_BASE_URL=http://{{ hostvars['bootstorage'].ansible_host }}:5000/api/bootstorage/"
+Environment="VUE_APP_EXPRESSED_BASE_URL=http://{{ hostvars['expressed'].ansible_host }}:3000/api/express/"
+Environment="VUE_APP_HAPPY_BASE_URL=http://{{ hostvars['happy'].ansible_host }}:4000/api/happy/"
+User=root
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=http
+
+[Install]
+WantedBy=multi-user.target

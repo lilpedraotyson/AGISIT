@@ -1,0 +1,17 @@
+[Unit]
+Description=http
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/bootstorage
+ExecStart=/usr/bin/java -jar target/bootstorage-0.0.1-SNAPSHOT.jar
+Environment="REDIS_HOST={{ redis_host }}"
+Environment="REDIS_PORT=6379"
+Environment="REDIS_PASSWORD="
+User=root
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=http
+
+[Install]
+WantedBy=multi-user.target

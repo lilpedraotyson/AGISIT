@@ -1,0 +1,15 @@
+[Unit]
+Description=http
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/{{ package }}
+ExecStart=/usr/bin/npm start
+Environment="BOOTSTORAGE_URL=http://{{ hostvars['bootstorage'].ansible_host }}:5000/api/bootstorage/"
+User=root
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=http
+
+[Install]
+WantedBy=multi-user.target
