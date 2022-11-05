@@ -44,4 +44,4 @@ As we can see, first there is a load balancer, which receives the users’ reque
 
 For the application usage we have a tutorial on youtube:
 
-- 
+- [Video](https://www.youtube.com/watch?v=wOqEbsOVv74&ab_channel=PedroMarques)
